@@ -92,8 +92,8 @@ def api_backtest():
 
 
 if __name__ == "__main__":
-    refresh_stats()
     sched = BackgroundScheduler()
+    sched.add_job(refresh_stats, "date")
     sched.add_job(scan, "interval", minutes=5)
     sched.add_job(refresh_stats, "interval", hours=6)
     sched.start()
