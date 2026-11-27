@@ -9,12 +9,14 @@ import setups
 import data
 import backtest
 import alerts
+import trades
 
 app = Flask(__name__)
 LATEST = []          # signals shown on the site
 SENT = set()         # signals already emailed, so only the first per range is sent
 STATS = {}           # backtest results per symbol
 NEWS = []            # latest headlines
+CHART_CACHE = {}
 
 NEWS_FEEDS = [
     ("ForexLive", "https://investinglive.com/rss/news"),
@@ -106,7 +108,7 @@ h2{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--mute);
 .news .item:last-child{border:0}
 .empty{color:var(--mute);font-size:14px}
 </style></head><body>
-<header><b>MY SETUPS</b><span id=clock></span></header>
+<header><b>MY SETUPS</b><span><a href="/chart" style="color:#4f7cff">Open chart</a> &nbsp; <span id=clock></span></span></header>
 <main>
 <section>
   <h2>Live setups</h2><div id=list class=empty>No setups yet</div>
@@ -149,10 +151,82 @@ load(); setInterval(load, 60000);
 </body></html>
 """
 
+CHART_PAGE = """
+<!doctype html><html><head><meta charset=utf-8><title>Chart</title>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+body{margin:0;background:#03060f;color:#e6ecff;font-family:system-ui,sans-serif}
+header{display:flex;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid #1a2542;flex-wrap:wrap}
+select,a{background:#0b1224;color:#e6ecff;border:1px solid #1a2542;border-radius:8px;padding:6px 10px;text-decoration:none;font-size:14px}
+#chart{height:70vh;margin:10px}
+#info{padding:0 16px 16px;color:#8a96b8;font-size:13px}
+</style></head><body>
+<header><a href="/">Home</a>
+<select id=sym><option>GOLD</option><option>BTC</option><option>SILVER</option><option>ETH</option><option>EURUSD</option></select>
+<select id=tf><option>15m</option><option>5m</option></select>
+<span id=msg style="color:#8a96b8"></span></header>
+<div id=chart></div><div id=info></div>
+<script>
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+  layout:{background:{color:'#03060f'},textColor:'#8a96b8'},
+  grid:{vertLines:{color:'#0f1830'},horzLines:{color:'#0f1830'}},
+  timeScale:{timeVisible:true,secondsVisible:false},
+  rightPriceScale:{borderColor:'#1a2542'}
+});
+const series = chart.addCandlestickSeries({
+  upColor:'#22d39a',downColor:'#ff5c6c',borderVisible:false,
+  wickUpColor:'#22d39a',wickDownColor:'#ff5c6c'});
+let lines = [];
+window.addEventListener('resize',()=>chart.applyOptions({width:document.getElementById('chart').clientWidth}));
+
+async function load(){
+  const sym = document.getElementById('sym').value, tf = document.getElementById('tf').value;
+  document.getElementById('msg').textContent = 'Loading...';
+  const r = await fetch(`/api/chart/${sym}/${tf}`);
+  const p = await r.json();
+  if (p.error){document.getElementById('msg').textContent = 'Error: ' + p.error; return;}
+  series.setData(p.candles);
+  lines.forEach(l => series.removePriceLine(l)); lines = [];
+  const markers = [];
+  const recent = p.trades.slice(-3);
+  recent.forEach(t => {
+    lines.push(series.createPriceLine({price:t.entry,color:'#4f7cff',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:t.direction+' entry'}));
+    lines.push(series.createPriceLine({price:t.target,color:'#22d39a',lineWidth:1,lineStyle:0,axisLabelVisible:true,title:'TP'}));
+    lines.push(series.createPriceLine({price:t.stop,color:'#ff5c6c',lineWidth:1,lineStyle:0,axisLabelVisible:true,title:'SL'}));
+  });
+  p.trades.forEach(t => {
+    markers.push({time:t.entry_time,position:t.direction==='BUY'?'belowBar':'aboveBar',
+      color:'#4f7cff',shape:t.direction==='BUY'?'arrowUp':'arrowDown',text:t.direction});
+    if (t.status !== 'OPEN' && t.exit_time) {
+      markers.push({time:t.exit_time,position:t.direction==='BUY'?'aboveBar':'belowBar',
+        color:t.status==='WIN'?'#22d39a':'#ff5c6c',shape:'circle',
+        text:t.status==='WIN'?'TP hit':'SL hit'});
+    }
+  });
+  markers.sort((a,b)=>a.time-b.time);
+  series.setMarkers(markers);
+  chart.timeScale().fitContent();
+  const w = p.trades.filter(t=>t.status==='WIN').length, l = p.trades.filter(t=>t.status==='LOSS').length;
+  document.getElementById('msg').textContent = '';
+  document.getElementById('info').textContent =
+    `${p.trades.length} trades in view | target hit ${w} | stop hit ${l} | open ${p.trades.length-w-l}. Lines show the last 3 trades.`;
+}
+document.getElementById('sym').onchange = load;
+document.getElementById('tf').onchange = load;
+load(); setInterval(load, 120000);
+</script></body></html>
+"""
+
 
 @app.route("/")
 def home():
     return render_template_string(PAGE)
+
+
+@app.route("/chart")
+def chart_page():
+    return render_template_string(CHART_PAGE)
 
 
 @app.route("/api/signals")
@@ -163,6 +237,27 @@ def api_signals():
 @app.route("/api/news")
 def api_news():
     return jsonify(NEWS)
+
+
+@app.route("/api/backtest")
+def api_backtest():
+    return jsonify(STATS)
+
+
+@app.route("/api/chart/<symbol>/<tf>")
+def api_chart(symbol, tf):
+    if symbol not in config.SYMBOLS or tf not in ("5m", "15m"):
+        return jsonify({"error": "bad symbol or timeframe"}), 400
+    key = (symbol, tf)
+    hit = CHART_CACHE.get(key)
+    if hit and time.time() - hit[0] < 120:
+        return jsonify(hit[1])
+    try:
+        payload = trades.chart_payload(symbol, tf)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    CHART_CACHE[key] = (time.time(), payload)
+    return jsonify(payload)
 
 
 @app.route("/test-email")
@@ -180,11 +275,6 @@ def test_email():
         return "Test email sent. Check your Gmail inbox and spam."
     except Exception as e:
         return f"Email failed: {e}", 500
-
-
-@app.route("/api/backtest")
-def api_backtest():
-    return jsonify(STATS)
 
 
 if __name__ == "__main__":
