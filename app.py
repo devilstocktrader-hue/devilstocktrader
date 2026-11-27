@@ -68,7 +68,10 @@ async function load(){
   const b = await (await fetch('/api/backtest')).json();
   document.getElementById('bt').innerHTML = Object.entries(b).map(([sym, st]) =>
     Object.entries(st).map(([name, v]) =>
-      `<div class=c><b>${sym}</b> ${name}<br>Trades ${v.total} | Win ${v.win_rate}% | Loss ${v.loss_rate}%</div>`).join('')).join('');
+      `<div class=c><b>${sym}</b> ${name}<br>`+
+      `All: ${v.ALL.total} trades | Win ${v.ALL.win_rate}% | Loss ${v.ALL.loss_rate}%<br>`+
+      `BUY: ${v.BUY.total} trades | Win ${v.BUY.win_rate}% | Loss ${v.BUY.loss_rate}%<br>`+
+      `SELL: ${v.SELL.total} trades | Win ${v.SELL.win_rate}% | Loss ${v.SELL.loss_rate}%</div>`).join('')).join('') || 'Backtest is still running, refresh in a few minutes';
 }
 Notification.requestPermission();
 load(); setInterval(load, 60000);
@@ -84,6 +87,23 @@ def home():
 @app.route("/api/signals")
 def api_signals():
     return jsonify(LATEST[:50])
+
+
+@app.route("/test-email")
+def test_email():
+    fake = {
+        "setup": "Setup 1: H4 break + range break",
+        "direction": "BUY",
+        "timeframe": "5m",
+        "price": 4000.00,
+        "stop_loss": 3996.50,
+        "target": 4010.00,
+    }
+    try:
+        alerts.send_email("TEST: GOLD BUY setup", alerts.format_signal("GOLD", fake, STATS.get("GOLD")))
+        return "Test email sent. Check your Gmail inbox and spam."
+    except Exception as e:
+        return f"Email failed: {e}", 500
 
 
 @app.route("/api/backtest")
