@@ -25,7 +25,8 @@ def format_signal(symbol, sig, stats):
         f"Target: {sig['target']}",
     ]
     if st:
+        side = st.get(sig["direction"]) or st["ALL"]
         lines.append(
-            f"Past record: {st['total']} trades, win {st['win_rate']} percent, loss {st['loss_rate']} percent"
+            f"Past record for {sig['direction']}: {side['total']} trades, win {side['win_rate']} percent, loss {side['loss_rate']} percent"
         )
     return "\n".join(lines)
