@@ -17,6 +17,8 @@ SENT = set()         # signals already emailed, so only the first per range is s
 STATS = {}           # backtest results per symbol
 NEWS = []            # latest headlines
 CHART_CACHE = {}
+SECRET = os.environ.get("FEED_SECRET", "change-me")
+FEED = {}            # FEED[symbol][tf] = candles sent by MetaTrader 5
 
 NEWS_FEEDS = [
     ("ForexLive", "https://investinglive.com/rss/news"),
@@ -108,7 +110,7 @@ h2{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--mute);
 .news .item:last-child{border:0}
 .empty{color:var(--mute);font-size:14px}
 </style></head><body>
-<header><b>MY SETUPS</b><span><a href="/chart" style="color:#4f7cff">Open chart</a> &nbsp; <span id=clock></span></span></header>
+<header><b>MY SETUPS</b><span><a href="/live" style="color:#22d39a">Exness live</a> &nbsp; <a href="/chart" style="color:#4f7cff">Replay chart</a> &nbsp; <span id=clock></span></span></header>
 <main>
 <section>
   <h2>Live setups</h2><div id=list class=empty>No setups yet</div>
@@ -219,6 +221,58 @@ load(); setInterval(load, 120000);
 """
 
 
+LIVE_PAGE = """
+<!doctype html><html><head><meta charset=utf-8><title>Exness Live</title>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+body{margin:0;background:#03060f;color:#e6ecff;font-family:system-ui,sans-serif}
+header{display:flex;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid #1a2542;flex-wrap:wrap}
+select,a{background:#0b1224;color:#e6ecff;border:1px solid #1a2542;border-radius:8px;padding:6px 10px;text-decoration:none;font-size:14px}
+#chart{height:75vh;margin:10px}
+</style></head><body>
+<header><a href="/">Home</a>
+<select id=sym></select>
+<select id=tf>
+<option>M1</option><option>M2</option><option>M3</option><option>M5</option><option>M10</option>
+<option>M15</option><option>M30</option><option>H1</option><option>H4</option><option>D1</option><option>W1</option>
+</select>
+<span id=msg style="color:#8a96b8"></span></header>
+<div id=chart></div>
+<script>
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+  layout:{background:{color:'#03060f'},textColor:'#8a96b8'},
+  grid:{vertLines:{color:'#0f1830'},horzLines:{color:'#0f1830'}},
+  timeScale:{timeVisible:true,secondsVisible:false},
+  rightPriceScale:{borderColor:'#1a2542'}
+});
+const series = chart.addCandlestickSeries({upColor:'#22d39a',downColor:'#ff5c6c',borderVisible:false,wickUpColor:'#22d39a',wickDownColor:'#ff5c6c'});
+window.addEventListener('resize',()=>chart.applyOptions({width:document.getElementById('chart').clientWidth}));
+let first = true;
+async function symbols(){
+  const s = await (await fetch('/api/mt5/symbols')).json();
+  const el = document.getElementById('sym'), cur = el.value;
+  el.innerHTML = s.map(x=>`<option>${x}</option>`).join('');
+  if (cur && s.includes(cur)) el.value = cur;
+}
+async function load(){
+  await symbols();
+  const sym = document.getElementById('sym').value, tf = document.getElementById('tf').value;
+  if (!sym){document.getElementById('msg').textContent='No symbols yet. Open MetaTrader 5 and run the expert.';return;}
+  const r = await fetch(`/api/mt5/${sym}/${tf}`);
+  const p = await r.json();
+  if (p.error){document.getElementById('msg').textContent = p.error; return;}
+  document.getElementById('msg').textContent = '';
+  series.setData(p.candles);
+  if (first){chart.timeScale().fitContent(); first=false;}
+}
+document.getElementById('sym').onchange = ()=>{first=true;load();};
+document.getElementById('tf').onchange = ()=>{first=true;load();};
+load(); setInterval(load, 2000);
+</script></body></html>
+"""
+
+
 @app.route("/")
 def home():
     return render_template_string(PAGE)
@@ -258,6 +312,38 @@ def api_chart(symbol, tf):
         return jsonify({"error": str(e)}), 500
     CHART_CACHE[key] = (time.time(), payload)
     return jsonify(payload)
+
+
+@app.route("/feed", methods=["POST"])
+def feed_in():
+    from flask import request
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("secret") != SECRET:
+        return jsonify({"error": "bad secret"}), 403
+    sym, tf = body.get("symbol"), body.get("tf")
+    cs = body.get("candles", [])
+    if not sym or not tf or not cs:
+        return jsonify({"error": "missing data"}), 400
+    FEED.setdefault(sym, {})[tf] = cs[-1500:]
+    return jsonify({"ok": True, "count": len(cs)})
+
+
+@app.route("/api/mt5/symbols")
+def mt5_symbols():
+    return jsonify(sorted(FEED.keys()))
+
+
+@app.route("/api/mt5/<symbol>/<tf>")
+def mt5_chart(symbol, tf):
+    cs = FEED.get(symbol, {}).get(tf)
+    if not cs:
+        return jsonify({"error": "no data yet, is MetaTrader 5 open with the expert running?"}), 404
+    return jsonify({"symbol": symbol, "tf": tf, "candles": cs, "trades": []})
+
+
+@app.route("/live")
+def live_page():
+    return render_template_string(LIVE_PAGE)
 
 
 @app.route("/test-email")
